@@ -1,0 +1,3 @@
+[submodule "hw/darkriscv"]
+	path = hw/darkriscv
+	url = https://github.com/AndrewGBelcher/darkriscv

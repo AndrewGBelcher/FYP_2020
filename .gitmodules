@@ -1,3 +1,12 @@
 [submodule "hw/darkriscv"]
 	path = hw/darkriscv
 	url = https://github.com/AndrewGBelcher/darkriscv
+[submodule "HW/darkriscv"]
+	path = HW/darkriscv
+	url = https://github.com/AndrewGBelcher/darkriscv
+[submodule "ISS/riscv-tools"]
+	path = ISS/riscv-tools
+	url = https://github.com/AndrewGBelcher/riscv-tools
+[submodule "SW/riscv-gnu-toolchain"]
+	path = SW/riscv-gnu-toolchain
+	url = https://github.com/AndrewGBelcher/riscv-gnu-toolchain

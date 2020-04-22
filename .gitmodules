@@ -3,7 +3,7 @@
 	url = https://github.com/AndrewGBelcher/darkriscv
 [submodule "HW/darkriscv"]
 	path = HW/darkriscv
-	url = https://github.com/AndrewGBelcher/darkriscv/
+	url = https://github.com/AndrewGBelcher/darkriscv
 [submodule "ISS/riscv-tools"]
 	path = ISS/riscv-tools
 	url = https://github.com/AndrewGBelcher/riscv-tools

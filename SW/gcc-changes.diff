@@ -1,0 +1,227 @@
+diff --git a/gcc/common/config/riscv/riscv-common.c b/gcc/common/config/riscv/riscv-common.c
+index a16d6c5b448..5eb0f8ceaf3 100644
+--- a/gcc/common/config/riscv/riscv-common.c
++++ b/gcc/common/config/riscv/riscv-common.c
+@@ -575,6 +575,11 @@ riscv_parse_arch_string (const char *isa, int *flags, location_t loc)
+   if (subset_list->lookup ("c"))
+     *flags |= MASK_RVC;
+ 
++  /* shadow stack extension support */
++  *flags &= ~MASK_SSTACK;
++  if (subset_list->lookup ("s"))
++    *flags |= MASK_SSTACK;
++
+   if (current_subset_list)
+     delete current_subset_list;
+ 
+diff --git a/gcc/config/riscv/riscv-opts.h b/gcc/config/riscv/riscv-opts.h
+index d00fbe20f27..29f660ed4db 100644
+--- a/gcc/config/riscv/riscv-opts.h
++++ b/gcc/config/riscv/riscv-opts.h
+@@ -51,4 +51,5 @@ enum riscv_align_data {
+   riscv_align_data_type_natural
+ };
+ 
++
+ #endif /* ! GCC_RISCV_OPTS_H */
+diff --git a/gcc/config/riscv/riscv.c b/gcc/config/riscv/riscv.c
+index efb34117da4..632bc413dc1 100644
+--- a/gcc/config/riscv/riscv.c
++++ b/gcc/config/riscv/riscv.c
+@@ -3864,12 +3864,16 @@ riscv_expand_prologue (void)
+   unsigned mask = frame->mask;
+   rtx insn;
+ 
++  if(TARGET_SSTACK)
++		emit_insn(gen_ssst());
++
+   if (flag_stack_usage_info)
+     current_function_static_stack_size = size;
+ 
+   if (cfun->machine->naked_p)
+     return;
+ 
++
+   /* When optimizing for size, call a subroutine to save the registers.  */
+   if (riscv_use_save_libcall (frame))
+     {
+@@ -3884,6 +3888,8 @@ riscv_expand_prologue (void)
+       REG_NOTES (insn) = dwarf;
+     }
+ 
++
++
+   /* Save the registers.  */
+   if ((frame->mask | frame->fmask) != 0)
+     {
+@@ -3899,6 +3905,8 @@ riscv_expand_prologue (void)
+ 
+   frame->mask = mask; /* Undo the above fib.  */
+ 
++
++
+   /* Set up the frame pointer, if we're using one.  */
+   if (frame_pointer_needed)
+     {
+@@ -3980,6 +3988,8 @@ riscv_expand_epilogue (int style)
+   bool need_barrier_p = (get_frame_size ()
+ 			 + cfun->machine->frame.arg_pointer_offset) != 0;
+ 
++
++
+   if (cfun->machine->naked_p)
+     {
+       gcc_assert (style == NORMAL_RETURN);
+@@ -3991,6 +4001,9 @@ riscv_expand_epilogue (int style)
+ 
+   if ((style == NORMAL_RETURN) && riscv_can_use_return_insn ())
+     {
++       if(TARGET_SSTACK)
++		emit_insn(gen_ssld());
++
+       emit_jump_insn (gen_return ());
+       return;
+     }
+@@ -4101,17 +4114,23 @@ riscv_expand_epilogue (int style)
+       REG_NOTES (insn) = dwarf;
+     }
+ 
++
+   if (use_restore_libcall)
+     {
++
+       rtx dwarf = riscv_adjust_libcall_cfi_epilogue ();
+       insn = emit_insn (gen_gpr_restore (GEN_INT (riscv_save_libcall_count (mask))));
+       RTX_FRAME_RELATED_P (insn) = 1;
+       REG_NOTES (insn) = dwarf;
+ 
++	  if(TARGET_SSTACK)
++	    emit_insn(gen_ssld());
++
+       emit_jump_insn (gen_gpr_restore_return (ra));
+       return;
+     }
+ 
++
+   /* Add in the __builtin_eh_return stack adjustment. */
+   if ((style == EXCEPTION_RETURN) && crtl->calls_eh_return)
+     emit_insn (gen_add3_insn (stack_pointer_rtx, stack_pointer_rtx,
+@@ -4124,15 +4143,29 @@ riscv_expand_epilogue (int style)
+ 
+       gcc_assert (mode != UNKNOWN_MODE);
+ 
+-      if (mode == MACHINE_MODE)
+-	emit_jump_insn (gen_riscv_mret ());
+-      else if (mode == SUPERVISOR_MODE)
+-	emit_jump_insn (gen_riscv_sret ());
+-      else
+-	emit_jump_insn (gen_riscv_uret ());
+-    }
++		if (mode == MACHINE_MODE)
++		{
++			emit_jump_insn (gen_riscv_mret ());
++		}
++		  else if (mode == SUPERVISOR_MODE)
++		{
++			emit_jump_insn (gen_riscv_sret ());
++		}  
++		else
++		{
++			emit_jump_insn (gen_riscv_uret ());
++		}
++	}
++
++
+   else if (style != SIBCALL_RETURN)
++	{
++	
++	if(TARGET_SSTACK)
++		emit_insn(gen_ssld());
++
+     emit_jump_insn (gen_simple_return_internal (ra));
++	}
+ }
+ 
+ /* Implement EPILOGUE_USES.  */
+diff --git a/gcc/config/riscv/riscv.h b/gcc/config/riscv/riscv.h
+index 2e27e83962d..8eb294f5c46 100644
+--- a/gcc/config/riscv/riscv.h
++++ b/gcc/config/riscv/riscv.h
+@@ -656,6 +656,8 @@ typedef struct {
+ 
+ #define Pmode word_mode
+ 
++
++
+ /* Give call MEMs SImode since it is the "most permissive" mode
+    for both 32-bit and 64-bit targets.  */
+ 
+diff --git a/gcc/config/riscv/riscv.md b/gcc/config/riscv/riscv.md
+index f3d8f4fc51e..e1c09a005b5 100644
+--- a/gcc/config/riscv/riscv.md
++++ b/gcc/config/riscv/riscv.md
+@@ -65,6 +65,9 @@
+   UNSPECV_BLOCKAGE
+   UNSPECV_FENCE
+   UNSPECV_FENCE_I
++
++  UNSPECV_SSST
++  UNSPECV_SSLD
+ ])
+ 
+ (define_constants
+@@ -2102,7 +2105,7 @@
+ (define_insn "jump"
+   [(set (pc)
+ 	(label_ref (match_operand 0 "" "")))]
+-  ""
++  ""	
+   "j\t%l0"
+   [(set_attr "type"	"jump")
+    (set_attr "mode"	"none")])
+@@ -2159,6 +2162,20 @@
+ ;;  ....................
+ ;;
+ 
++(define_insn "ssst"
++[(unspec_volatile [(const_int 0)] UNSPECV_SSST)]
++""
++{
++	return "ssst";
++})
++
++(define_insn "ssld"
++[(unspec_volatile [(const_int 1)] UNSPECV_SSLD)]
++""
++{
++	return "ssld";
++})
++
+ (define_expand "prologue"
+   [(const_int 1)]
+   ""
+diff --git a/gcc/config/riscv/riscv.opt b/gcc/config/riscv/riscv.opt
+index 7f0c35e9e9c..0e9ff6ee7c6 100644
+--- a/gcc/config/riscv/riscv.opt
++++ b/gcc/config/riscv/riscv.opt
+@@ -91,6 +91,10 @@ mcmodel=
+ Target Report RejectNegative Joined Enum(code_model) Var(riscv_cmodel) Init(TARGET_DEFAULT_CMODEL)
+ Specify the code model.
+ 
++; Alternative to enabling shadow stack opcode support
++msstack
++Target Report Mask(SSTACK)
++
+ mstrict-align
+ Target Report Mask(STRICT_ALIGN) Save
+ Do not generate unaligned memory accesses.
+@@ -128,6 +132,9 @@ Mask(RVC)
+ 
+ Mask(RVE)
+ 
++; Support for shadow stack opcodes via arch extensions
++Mask(SSTACK)
++
+ mriscv-attribute
+ Target Report Var(riscv_emit_attribute_p) Init(-1)
+ Emit RISC-V ELF attribute.

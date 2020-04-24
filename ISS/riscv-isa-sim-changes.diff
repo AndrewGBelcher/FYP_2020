@@ -1,0 +1,553 @@
+
+diff --git a/riscv/encoding.h b/riscv/encoding.h
+index a18a0c9..f1c5632 100644
+--- a/riscv/encoding.h
++++ b/riscv/encoding.h
+@@ -264,6 +264,10 @@
+ #define MASK_ANDI  0x707f
+ #define MATCH_ADD 0x33
+ #define MASK_ADD  0xfe00707f
++
++#define MATCH_MOD 0x20000033                                                    
++#define MASK_MOD 0xfe00707f
++
+ #define MATCH_SUB 0x40000033
+ #define MASK_SUB  0xfe00707f
+ #define MATCH_SLL 0x1033
+@@ -1504,6 +1508,16 @@
+ #define MASK_VAMOMINUQ_V  0xf800707f
+ #define MATCH_VAMOMAXUQ_V 0xe000002f
+ #define MASK_VAMOMAXUQ_V  0xf800707f
++
++/* Shadow Stack implementation */
++#define MATCH_SSST 0x2b
++#define MASK_SSST  0xffffffff
++#define MATCH_SSLD 0x57
++#define MASK_SSLD  0xffffffff
++#define MATCH_SSTH 0x7b
++#define MASK_SSTH  0xff
++/* end of Shadow Stack implementation */
++
+ #define CSR_FFLAGS 0x1
+ #define CSR_FRM 0x2
+ #define CSR_FCSR 0x3
+@@ -1794,6 +1808,9 @@ DECLARE_INSN(srai, MATCH_SRAI, MASK_SRAI)
+ DECLARE_INSN(ori, MATCH_ORI, MASK_ORI)
+ DECLARE_INSN(andi, MATCH_ANDI, MASK_ANDI)
+ DECLARE_INSN(add, MATCH_ADD, MASK_ADD)
++
++DECLARE_INSN(mod, MATCH_MOD, MASK_MOD)
++
+ DECLARE_INSN(sub, MATCH_SUB, MASK_SUB)
+ DECLARE_INSN(sll, MATCH_SLL, MASK_SLL)
+ DECLARE_INSN(slt, MATCH_SLT, MASK_SLT)
+@@ -2414,6 +2431,14 @@ DECLARE_INSN(vamominq_v, MATCH_VAMOMINQ_V, MASK_VAMOMINQ_V)
+ DECLARE_INSN(vamomaxq_v, MATCH_VAMOMAXQ_V, MASK_VAMOMAXQ_V)
+ DECLARE_INSN(vamominuq_v, MATCH_VAMOMINUQ_V, MASK_VAMOMINUQ_V)
+ DECLARE_INSN(vamomaxuq_v, MATCH_VAMOMAXUQ_V, MASK_VAMOMAXUQ_V)
++
++/* Shadow Stack implementation */
++DECLARE_INSN(ssst, MATCH_SSST, MASK_SSST)
++DECLARE_INSN(ssld, MATCH_SSLD, MASK_SSLD)
++DECLARE_INSN(ssth, MATCH_SSTH, MASK_SSTH)
++/* end of Shadow Stack implementation */
++
++
+ #endif
+ #ifdef DECLARE_CSR
+ DECLARE_CSR(fflags, CSR_FFLAGS)
+diff --git a/riscv/insns/mod.h b/riscv/insns/mod.h
+new file mode 100644
+index 0000000..c6e8f1c
+--- /dev/null
++++ b/riscv/insns/mod.h
+@@ -0,0 +1 @@
++WRITE_RD(sext_xlen(RS1 % RS2));
+\ No newline at end of file
+diff --git a/riscv/insns/ssld.h b/riscv/insns/ssld.h
+new file mode 100644
+index 0000000..4ca969a
+--- /dev/null
++++ b/riscv/insns/ssld.h
+@@ -0,0 +1,9 @@
++sstack_t *ss;
++ss = p->get_mmu()->get_sstack();
++int dout = ss->pop();
++int result = ss->authenticate(READ_REG(X_RA), dout);
++if(result != 0)
++{
++	printf("dout:%x ra_reg:%x result:%x\n",dout, READ_REG(X_RA), result);
++	WRITE_REG(X_RA, dout);
++} 
+diff --git a/riscv/insns/ssst.h b/riscv/insns/ssst.h
+new file mode 100644
+index 0000000..349bbe5
+--- /dev/null
++++ b/riscv/insns/ssst.h
+@@ -0,0 +1,4 @@
++reg_t ra = READ_REG(1);
++sstack_t *ss;
++ss = p->get_mmu()->get_sstack();
++ss->push(ra);
+\ No newline at end of file
+diff --git a/riscv/insns/ssth.h b/riscv/insns/ssth.h
+new file mode 100644
+index 0000000..9c7e904
+--- /dev/null
++++ b/riscv/insns/ssth.h
+@@ -0,0 +1,4 @@
++int thread_selector = insn.u_imm() >> 12;
++sstack_t *ss;
++ss = p->get_mmu()->get_sstack();
++ss->select(thread_selector);
+\ No newline at end of file
+diff --git a/riscv/mmu.cc b/riscv/mmu.cc
+index a0e500b..e5bfe5f 100644
+--- a/riscv/mmu.cc
++++ b/riscv/mmu.cc
+@@ -12,6 +12,7 @@ mmu_t::mmu_t(simif_t* sim, processor_t* proc)
+   matched_trigger(NULL)
+ {
+   flush_tlb();
++  sstack = new sstack_t();
+   yield_load_reservation();
+ }
+ 
+diff --git a/riscv/mmu.h b/riscv/mmu.h
+index 9826cf1..727824d 100644
+--- a/riscv/mmu.h
++++ b/riscv/mmu.h
+@@ -5,6 +5,7 @@
+ 
+ #include "decode.h"
+ #include "trap.h"
++#include "sstack.h"
+ #include "common.h"
+ #include "config.h"
+ #include "simif.h"
+@@ -56,6 +57,8 @@ public:
+   mmu_t(simif_t* sim, processor_t* proc);
+   ~mmu_t();
+ 
++  sstack_t* get_sstack() { return sstack; }
++
+   inline reg_t misaligned_load(reg_t addr, size_t size)
+   {
+ #ifdef RISCV_ENABLE_MISALIGNED
+@@ -377,6 +380,10 @@ private:
+   trigger_matched_t *matched_trigger;
+ 
+   friend class processor_t;
++
++  friend class sstack_t;
++
++  sstack_t *sstack;
+ };
+ 
+ struct vm_info {
+diff --git a/riscv/riscv.mk.in b/riscv/riscv.mk.in
+index af5bbdc..530fc99 100644
+--- a/riscv/riscv.mk.in
++++ b/riscv/riscv.mk.in
+@@ -26,6 +26,7 @@ riscv_hdrs = \
+ 	rocc.h \
+ 	insn_template.h \
+ 	debug_module.h \
++	sstack.h \
+ 	debug_rom_defines.h \
+ 	remote_bitbang.h \
+ 	jtag_dtm.h \
+@@ -53,6 +54,7 @@ riscv_srcs = \
+ 	rom.cc \
+ 	clint.cc \
+ 	debug_module.cc \
++	sstack.cc \
+ 	remote_bitbang.cc \
+ 	jtag_dtm.cc \
+ 	$(riscv_gen_srcs) \
+@@ -116,6 +118,7 @@ riscv_insn_ext_i = \
+ 	xori \
+ 	fence \
+ 	fence_i \
++	mod \
+ 
+ riscv_insn_ext_a = \
+ 	amoadd_d \
+@@ -664,6 +667,10 @@ riscv_insn_priv = \
+ 	sret \
+ 	wfi \
+ 
++riscv_insn_sstack = \
++	ssst \
++	ssld \
++	ssth \
+ 
+ riscv_insn_list = \
+ 	$(riscv_insn_ext_a) \
+@@ -675,6 +682,7 @@ riscv_insn_list = \
+ 	$(riscv_insn_ext_q) \
+ 	$(if $(HAVE_INT128),$(riscv_insn_ext_v),) \
+ 	$(riscv_insn_priv) \
++	$(riscv_insn_sstack) \
+ 
+ riscv_gen_srcs = \
+ 	$(addsuffix .cc,$(riscv_insn_list))
+diff --git a/riscv/sstack.cc b/riscv/sstack.cc
+new file mode 100644
+index 0000000..44844e1
+--- /dev/null
++++ b/riscv/sstack.cc
+@@ -0,0 +1,166 @@
++/**
++ * @file sstack.cc
++ * @author Andrew Belcher
++ * @date 19 April 2020
++ * @brief Source file for the shadow stack component
++ */
++
++#include "sstack.h"
++#include "processor.h"
++#include "trap.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++#define SSTACK_ASSERT(m) printf("SSTACK_ASSERT FAILED: " m  "\n"); abort();
++
++
++/** @brief Shadow Stack Constructor
++ *
++ *  @param void
++ *  @return Shadow Stack Class instance
++ */
++sstack_t::sstack_t(void)
++{
++	stack_selector = 0;
++	verbose_mode = false;
++	
++	for(int i = 0; i < SHADOW_STACK_COUNT; i++)
++	{
++		ss_banks[i].sp = 0;
++		
++		for(int p = 0; p < SHADOW_STACK_SIZE; p++)
++		{
++			ss_banks[i].SSTACK[p] = 0;
++		}
++	}
++}
++
++
++/** @brief Sets whether the Shadow Stack module prints internal info
++ *	
++ *  @param bool mode, true allows it, false denies it
++ *  @return void
++ */
++void sstack_t::set_verbose_mode(bool mode)
++{
++	verbose_mode = mode;
++}
++
++
++/** @brief Pushes the return address to the Shadow Stack selected
++ *
++ *  @param int ra, the return address
++ *  @return void
++ */
++void sstack_t::push(int ra)
++{
++	shadow_stack* ss = &ss_banks[stack_selector];
++
++	if(ss->sp >= SHADOW_STACK_SIZE)
++	{
++		SSTACK_ASSERT("stack is full!");
++	}
++
++	else	
++	{
++		ss->SSTACK[ss->sp++] = ra;
++
++		if(verbose_mode)
++		{
++			printf("ssst sp:%d ra:%x\n", ss->sp-1, ss->SSTACK[ss->sp-1]);
++		}
++	}
++}
++
++/** @brief Pushes the return address to the Shadow Stack selected
++ *
++ *  @param void
++ *  @retrun int pop_val, the return address
++ */
++int sstack_t::pop(void)
++{
++	shadow_stack* ss = &ss_banks[stack_selector];
++	int pop_val = 0x33;
++
++	if(ss->sp < 1)
++	{
++		SSTACK_ASSERT("stack is empty!");
++	}
++
++	else	
++	{
++		pop_val = ss->SSTACK[--ss->sp];
++
++		if(verbose_mode)
++		{
++			printf("ssld sp:%d ra:%x\n", ss->sp, pop_val);
++		}
++	}
++
++	return pop_val;
++}
++
++/** @brief Pushes the return address to the Shadow Stack selected
++ *
++ *  @param int ra, the return address to authenticate
++ *  @param int din, the data popped off the stack used to auhthenticate with
++ *  @retrun int result, the output from XORing the 2 inputs, needs to be 0 to be successful
++ */
++int sstack_t::authenticate(int ra, int din)
++{
++	int result = din ^ ra;
++
++	if(verbose_mode)
++	{
++		printf("auth ra=%lx datain=%lx\n", ra, din);
++	}
++
++	return result;
++}
++
++
++/** @brief Changes the Shadow Stack selecter value
++ *
++ *  @param int selector, a value that represents which stack to use, 0-3(max is set by SHADOW_STACK_COUNT
++ *  @retrun void
++ */
++void sstack_t::select(int selector)
++{
++
++	if(verbose_mode)
++	{
++		printf("ssth %d\n", selector);
++	}
++
++	if((selector < 0) || (selector >= SHADOW_STACK_COUNT))
++	{
++		SSTACK_ASSERT("selector is not valid!");
++	}
++
++	else
++	{
++		stack_selector = selector;
++	}
++}
++
++
++/** @brief Clears all Shadow Stacks
++ *
++ *  @param void
++ *  @retrun void
++ */
++void sstack_t::clear(void)
++{
++	for(int i = 0; i < SHADOW_STACK_COUNT; i++)
++	{
++		shadow_stack* ss = &ss_banks[i];
++
++		for(int p = 0; p < SHADOW_STACK_SIZE; p++)
++		{
++			ss->SSTACK[p] = 0;
++		}
++
++		ss->sp = 0;
++	}
++}
++
+diff --git a/riscv/sstack.h b/riscv/sstack.h
+new file mode 100644
+index 0000000..9eb98e7
+--- /dev/null
++++ b/riscv/sstack.h
+@@ -0,0 +1,80 @@
++/**
++ * @file sstack.h
++ * @author Andrew Belcher
++ * @date 19 April 2020
++ * @brief Header file for the shadow stack component
++ */
++
++#ifndef _RISCV_SSTACK_H
++#define _RISCV_SSTACK_H
++
++#define SHADOW_STACK_SIZE 0x100
++#define SHADOW_STACK_COUNT 4
++
++struct shadow_stack {
++	int sp;
++	int SSTACK[SHADOW_STACK_SIZE];
++};
++
++class sstack_t {
++private:
++
++	shadow_stack ss_banks[SHADOW_STACK_COUNT];
++	int stack_selector;
++	bool verbose_mode;
++
++public:
++
++	/** @brief Pushes the return address to the Shadow Stack selected
++	 *
++	 *  @param int ra, the return address
++	 *  @return void
++	 */
++	void push(int ra);
++
++	/** @brief Pushes the return address to the Shadow Stack selected
++	 *
++	 *  @param void
++	 *  @retrun int pop_val, the return address
++	 */
++	int pop(void);
++
++	/** @brief Pushes the return address to the Shadow Stack selected
++	 *
++	 *  @param int ra, the return address to authenticate
++	 *  @param int din, the data popped off the stack used to auhthenticate with
++	 *  @retrun int result, the output from XORing the 2 inputs, needs to be 0 to be successful
++	 */
++	int authenticate(int ra, int din);
++
++	/** @brief Changes the Shadow Stack selecter value
++	 *
++	 *  @param int selector, a value that represents which stack to use, 0-3(max is set by SHADOW_STACK_COUNT
++	 *  @retrun void
++	 */
++	void select(int selector);
++
++	/** @brief Clears all Shadow Stacks
++	 *
++	 *  @param void
++	 *  @retrun void
++	 */
++	void clear(void);
++
++	/** @brief Sets whether the Shadow Stack module prints internal info
++	 *	
++	 *  @param bool mode, true allows it, false denies it
++	 *  @return void
++	 */
++	void set_verbose_mode(bool mode);
++
++	/** @brief Shadow Stack Constructor
++	 *
++	 *  @param void
++	 *  @return Shadow Stack Class instance
++	 */
++	sstack_t();
++
++};
++
++#endif
+\ No newline at end of file
+diff --git a/spike_main/disasm.cc b/spike_main/disasm.cc
+index 0dbdbb7..e7488fb 100644
+--- a/spike_main/disasm.cc
++++ b/spike_main/disasm.cc
+@@ -380,6 +380,8 @@ disassembler_t::disassembler_t(int xlen)
+   #define DEFINE_FX2TYPE(code) DISASM_INSN(#code, code, 0, {&xrd, &frs1, &frs2})
+   #define DEFINE_XFTYPE(code) DISASM_INSN(#code, code, 0, {&frd, &xrs1})
+   #define DEFINE_SFENCE_TYPE(code) DISASM_INSN(#code, code, 0, {&xrs1, &xrs2})
++  
++
+ 
+   DEFINE_XLOAD(lb)
+   DEFINE_XLOAD(lbu)
+@@ -474,6 +476,7 @@ disassembler_t::disassembler_t(int xlen)
+   DEFINE_ITYPE_SHIFT(sraiw);
+ 
+   DEFINE_RTYPE(add);
++  DEFINE_RTYPE(mod);
+   DEFINE_RTYPE(sub);
+   DEFINE_RTYPE(sll);
+   DEFINE_RTYPE(slt);
+@@ -514,6 +517,12 @@ disassembler_t::disassembler_t(int xlen)
+   DEFINE_NOARG(fence_i);
+   DEFINE_SFENCE_TYPE(sfence_vma);
+ 
++  /* Shadow Stack implementation */
++  DEFINE_NOARG(ssst);
++  DEFINE_NOARG(ssld);
++  DEFINE_NOARG(ssth); 
++  /* end of Shadow Stack implementation */
++
+   add_insn(new disasm_insn_t("csrr", match_csrrs, mask_csrrs | mask_rs1, {&xrd, &csr}));
+   add_insn(new disasm_insn_t("csrw", match_csrrw, mask_csrrw | mask_rd, {&csr, &xrs1}));
+   add_insn(new disasm_insn_t("csrs", match_csrrs, mask_csrrs | mask_rd, {&csr, &xrs1}));
+diff --git a/spike_main/spike.cc b/spike_main/spike.cc
+index 19f877b..03c753b 100644
+--- a/spike_main/spike.cc
++++ b/spike_main/spike.cc
+@@ -28,6 +28,10 @@ static void help(int exit_code = 1)
+   fprintf(stderr, "  -l                    Generate a log of execution\n");
+   fprintf(stderr, "  -h, --help            Print this help message\n");
+   fprintf(stderr, "  -H                    Start halted, allowing a debugger to connect\n");
++
++  // shadow stack verbose options
++  fprintf(stderr, "  -vss                  Shadow Stack verbose mode\n");
++
+   fprintf(stderr, "  --isa=<name>          RISC-V ISA string [default %s]\n", DEFAULT_ISA);
+   fprintf(stderr, "  --varch=<name>        RISC-V Vector uArch string [default %s]\n", DEFAULT_VARCH);
+   fprintf(stderr, "  --pc=<address>        Override ELF entry point\n");
+@@ -59,6 +63,7 @@ static void help(int exit_code = 1)
+   fprintf(stderr, "  --dm-no-hasel         Debug module supports hasel\n");
+   fprintf(stderr, "  --dm-no-abstract-csr  Debug module won't support abstract to authenticate\n");
+   fprintf(stderr, "  --dm-no-halt-groups   Debug module won't support halt groups\n");
++  
+ 
+   exit(exit_code);
+ }
+@@ -108,6 +113,10 @@ int main(int argc, char** argv)
+   bool log = false;
+   bool dump_dts = false;
+   bool dtb_enabled = true;
++
++  // shadow stack verbose mode
++  bool ss_verbose = false;
++
+   size_t nprocs = 1;
+   reg_t start_pc = reg_t(-1);
+   std::vector<std::pair<reg_t, mem_t*>> mems;
+@@ -199,6 +208,10 @@ int main(int argc, char** argv)
+   parser.option('m', 0, 1, [&](const char* s){mems = make_mems(s);});
+   // I wanted to use --halted, but for some reason that doesn't work.
+   parser.option('H', 0, 0, [&](const char* s){halted = true;});
++
++  // parse shadow stack verbose mode
++  parser.option(0, "vss", 0, [&](const char* s){ss_verbose = true;});
++
+   parser.option(0, "rbb-port", 1, [&](const char* s){use_rbb = true; rbb_port = atoi(s);});
+   parser.option(0, "pc", 1, [&](const char* s){start_pc = strtoull(s, 0, 0);});
+   parser.option(0, "hartids", 1, hartids_parser);
+@@ -212,6 +225,10 @@ int main(int argc, char** argv)
+   parser.option(0, "extension", 1, [&](const char* s){extension = find_extension(s);});
+   parser.option(0, "dump-dts", 0, [&](const char *s){dump_dts = true;});
+   parser.option(0, "disable-dtb", 0, [&](const char *s){dtb_enabled = false;});
++
++
++
++
+   parser.option(0, "extlib", 1, [&](const char *s){
+     void *lib = dlopen(s, RTLD_NOW | RTLD_GLOBAL);
+     if (lib == NULL) {
+@@ -272,6 +289,9 @@ int main(int argc, char** argv)
+     if (extension) s.get_core(i)->register_extension(extension());
+   }
+ 
++  // set verbose mode internally
++  s.get_core(0)->get_mmu()->get_sstack()->set_verbose_mode(ss_verbose);
++
+   s.set_debug(debug);
+   s.set_log(log);
+   s.set_histogram(histogram);
